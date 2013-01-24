@@ -1,8 +1,6 @@
 <?php
 
-abstract class HTTP_Request {
-
-  protected $methods = array('GET','POST','PUT','DELETE');
+class HTTP_Request {
 
   protected $headers = array(
     'Host' => null,
@@ -10,22 +8,18 @@ abstract class HTTP_Request {
     'Content-type'=>'application/x-www-form-urlencoded',
     );
 
+  public $error;
+
   private $request_body_exists = FALSE;
   private $sock;
-
-  public $request = '';
-  protected $response;
+  private $request = '';
+  private $response;
+  private $params;
 
   protected $host;
   protected $path = '/';
   protected $port = '80';
   protected $method = 'GET';
-  protected $params;
-
-  abstract public function doGet($params);
-  abstract public function doPost($params);
-  abstract public function doPut($params);
-  abstract public function doDelete($params);
 
   public function __construct($resource = null, $method = 'GET'){
 
@@ -68,13 +62,7 @@ abstract class HTTP_Request {
 
   public function method($method){
 
-    $method = strtoupper($method);
-
-    if(!in_array($method, $this->methods)){
-      $method = 'GET';
-    }
-
-    $this->method = $method;
+    $this->method = $strtoupper($method);
 
     // for method chaining
     return $this;
@@ -134,6 +122,7 @@ abstract class HTTP_Request {
 
     if($this->sock === FALSE){
       // throw new Exception("Cannot establish connection to $this->host:$this->port ($errstr)", $errno);
+      $this->error = array($errno, $errstr);
       return false;
     }
 
@@ -151,11 +140,12 @@ abstract class HTTP_Request {
 
     fputs($this->sock, $this->request);
 
-    while (!feof($this->sock)) {
-      $this->response .= fgets($this->sock,1024);
+    $response_headers = '';
+    while (!preg_match("/\\r\\n\\r\\n$/", $response_headers)) {
+      $response_headers .= fgets($this->sock,1024);
     }
 
-    $this->response = new HTTP_Response($this->response);
+    $this->response = new HTTP_Response($this->sock, $response_headers);
 
     return fclose($this->sock);
   }
@@ -166,21 +156,25 @@ abstract class HTTP_Request {
 
     switch($part){
 
+      case 'h': 
       case 'headers': 
         return $this->response->get_headers();
       break;
 
-      case 'body': 
+      case 'b':
+      case 'body':
         return $this->response->get_body();
       break;
 
-      case 'object': 
+      case 'o':
+      case 'object':
         return $this->response;
       break;
 
+      case 'f':
       case 'full':
       default: 
-        return $this->response->get_headers() . "\r\n\r\n" . $this->response->get_body();
+        return $this->response->get_headers(TRUE) . "\r\n\r\n" . $this->response->get_body();
       break;
     }
   }
@@ -188,58 +182,78 @@ abstract class HTTP_Request {
 
 class HTTP_Response {
 
-  public $response;
-  public $headers;
+  private $response;
+  private $headers;
+  private $status;
 
-  public function __construct($response){
-    $headers = explode("\r\n", $response);
-    $response = explode("\r\n\r\n", $response);
+  public function __construct(&$sock, $headers){
 
-    $this->response['headers'] = $response[0];
-    $this->response['body'] = $response[1];
-
-    preg_match("#(?:HTTP)\/(?:[0-9\.]+) ([0-9]+) ([a-zA-Z0-9 -_]+)#", $headers[0] , $status_line_array);
-    $this->headers['Status']['line'] = $status_line_array[0];
-    $this->headers['Status']['code'] = $status_line_array[1];
-    $this->headers['Status']['msg'] = $status_line_array[2];
-
-    foreach($headers as $header){
-      preg_match("#([a-zA-Z0-9 -_]+?):(.+)#", $header, $header_array);
-      if( !empty($header_array[1]) && !empty($header_array[2])){
-        $this->headers[$header_array[1]] = trim($header_array[2]);
-      }
+    $headers = explode("\r\n", $headers);
+    foreach($headers as $line){
+      $this->parse_header($line);
     }
+
+    $this->parse_body($sock);
   }
 
-  public function get_headers(){
-    return $this->response['headers'];
+  public function get_headers($string = FALSE){
+
+    if($string == TRUE){
+      $headrs = '';
+      foreach($this->headers as $n => $v){ $headrs .= ($n!='status') ? "$n: $v\r\n" : "$v\r\n"; }
+      return $headrs;
+    }
+
+    return $this->headers;
   }
 
   public function get_body(){
-    return $this->response['body'];
+
+    return $this->response;
   }
 
-  public function headers($name = null){
+  protected function parse_body(&$sock){
+    while (!feof($sock)) {
+      $this->response .= fgets($sock,1024);
+    }
+  }
 
-    if($name == null) return $this->headers;
+  protected function parse_header($line){
+
+    if(preg_match("#(?:HTTP)\/(?:[0-9\.]+) ([0-9]+) ([a-zA-Z0-9 -_]+)#", $line , $status_line_array)){
+      $this->headers['status'] = $status_line_array[0];
+      $this->status['code'] = $status_line_array[1];
+      $this->status['msg'] = $status_line_array[2];
+    }
+
+    if(preg_match("#([a-zA-Z0-9 -_]+?): (.+)#", $line, $header_array)){
+      $this->headers[$header_array[1]] = trim($header_array[2]);
+    }
+  }
+
+  public function header($name){
 
     return isset($this->headers[$name]) ? $this->headers[$name] : false;
   }
 
   public function status($type = 'code'){
     switch($type){
+      case 'l':
       case 'line':
-        return $this->headers['Status']['line'];
+        return $this->headers['status'];
       break;
+
+      case 'm':
       case 'msg':
-        return $this->headers['Status']['msg'];
+        return $this->status['msg'];
       break;
+
+      case 'c':
       case 'code':
       default:
-        return $this->headers['Status']['code'];
+        return $this->status['code'];
       break;
     }
-
   }
 }
 
